@@ -3,7 +3,7 @@ import queue
 import uuid as ud
 from typing import Union
 
-class _StdinClall:
+class _StdinCall:
     __slots__ = ['data', 'proc_pid', 'call_uuid', 'tag']
     def __init__(self, data, proc_pid : int, call_uuid, tag):
         self.data = data
@@ -11,7 +11,7 @@ class _StdinClall:
         self.proc_pid = proc_pid
         self.call_uuid = call_uuid
 
-class _StdoutClall:
+class _StdoutCall:
     __slots__ = ['data', 'proc_pid', 'call_uuid', 'tag']
     def __init__(self, data, proc_pid : int, call_uuid, tag):
         self.data = data
@@ -19,7 +19,7 @@ class _StdoutClall:
         self.proc_pid = proc_pid
         self.call_uuid = call_uuid
 
-class _StderrClall:
+class _StderrCall:
     __slots__ = ['data', 'proc_pid', 'call_uuid', 'tag']
     def __init__(self, data, proc_pid : int, call_uuid, tag):
         self.data = data
@@ -54,14 +54,9 @@ class Transfer:
     _AllTransfers = _SemaphoredList([]) # static field
     _AliveCount = 0 # static field
 
-    _stdout = queue.Queue()
-    _stdin = queue.Queue()
-    _stdreq = queue.Queue() # only for blocking
-    _stderr = queue.Queue()
-
     _alive = False
-    _stdout_in_iteration = False
-    _stdin_in_iteration = False
+    _stdout_in_iteration = False # only for free
+    _stdin_in_iteration = False # only for free
     _stdinout_in_iteration = False # only for blocking
     _in_init_state = False
     _holder = None
@@ -71,6 +66,10 @@ class Transfer:
     tag = None
 
     def __init__(self, holder, locals : object, tag : str):
+        self._stdout = queue.Queue()
+        self._stdin = queue.Queue()
+        self._stdreq = queue.Queue()
+        self._stderr = queue.Queue()
         self._holder = holder
         self.locals = locals
         self.tag = tag
@@ -102,8 +101,10 @@ class Transfer:
             self._stdout_in_iteration = False
             return
         first_stdout_call = self._stdout.get()
+        request_pid = None
         stderr_return, request_uuid = await self._holder.stdout(self, first_stdout_call.data, first_stdout_call.call_uuid)
-        self._stderr.put(_StderrClall(stderr_return, None, request_uuid, self.tag))
+        if request_uuid == None: request_pid = first_stdout_call.proc_pid
+        self._stderr.put(_StderrCall(stderr_return, request_pid, request_uuid, self.tag))
         if self._holder.is_fatal(self, stderr_return) == True:
             await self._holder.on_fatal(self)
 
@@ -115,12 +116,15 @@ class Transfer:
         if self._in_init_state == True:
             self._stdout_in_iteration = False
             return
-        if self._holder.is_stdin_available(self) != True:
+        if self._stdreq.empty() == True or self._holder.is_stdin_available(self) != True:
             self._stdin_in_iteration = False
             return
+        first_stdreq_call = self._stdreq.get()
+        request_pid = None
         stdin_return, stderr_return, request_uuid = await self._holder.stdin(self)
-        self._stderr.put(_StderrClall(stderr_return, None, request_uuid, self.tag))
-        self._stdin.put(_StdinClall(stdin_return, None, request_uuid, self.tag))
+        if request_uuid == None: request_pid = first_stdreq_call.proc_pid
+        self._stderr.put(_StderrCall(stderr_return, request_pid, request_uuid, self.tag))
+        self._stdin.put(_StdinCall(stdin_return, request_pid, request_uuid, self.tag))
         if self._holder.is_fatal(self, stderr_return) == True:
             await self._holder.on_fatal(self)
 
@@ -138,7 +142,7 @@ class Transfer:
             while all_stdout_data.empty() != True:
                 first_stdout_call = all_stdout_data.get()
                 stderr_return = await self._holder.stdout(self, first_stdout_call.data)
-                self._stderr.put(_StderrClall(stderr_return, first_stdout_call.proc_pid, None, self.tag))
+                self._stderr.put(_StderrCall(stderr_return, first_stdout_call.proc_pid, None, self.tag))
                 if self._holder.is_fatal(self, stderr_return) == True:
                     await self._holder.on_fatal(self)
                     break
@@ -151,13 +155,13 @@ class Transfer:
                 first_stdin_awaits = all_stdreq_data.get()
                 stderr_return = await self._holder.stdout(self, first_stdin_awaits.data)
                 if self._holder.is_fatal(self, stderr_return) == True:
-                    self._stderr.put(_StderrClall(stderr_return, first_stdin_awaits.proc_pid, None, self.tag))
-                    self._stdin.put(_StdinClall(None, first_stdin_awaits.proc_pid, None, self.tag))
+                    self._stderr.put(_StderrCall(stderr_return, first_stdin_awaits.proc_pid, None, self.tag))
+                    self._stdin.put(_StdinCall(None, first_stdin_awaits.proc_pid, None, self.tag))
                     await self._holder.on_fatal(self)
                     break
                 stdin_return, stderr_return = await self._holder.stdin(self)
-                self._stderr.put(_StderrClall(stderr_return, first_stdin_awaits.proc_pid, None, self.tag))
-                self._stdin.put(_StdinClall(stdin_return, first_stdin_awaits.proc_pid, None, self.tag))
+                self._stderr.put(_StderrCall(stderr_return, first_stdin_awaits.proc_pid, None, self.tag))
+                self._stdin.put(_StdinCall(stdin_return, first_stdin_awaits.proc_pid, None, self.tag))
                 if self._holder.is_fatal(self, stderr_return) == True:
                     await self._holder.on_fatal(self)
                     break
@@ -370,7 +374,7 @@ class _Interrupt:
         self.no_track = no_track
         self.interrupt_uuid = track_uuid
 
-        self.proc_stdout = _StdoutClall(proc_stdout, process_pid, self.interrupt_uuid, process_tag)
+        self.proc_stdout = _StdoutCall(proc_stdout, process_pid, self.interrupt_uuid, process_tag)
         self.transfer_stdin = None
         self.transfer_stderr = None
 
@@ -441,7 +445,7 @@ class _Core:
                     if inter.in_progress == True: continue
                     if inter.proc_stdout.data != None and inter.expects_input != True:
                         tr._stdout.put(inter.proc_stdout)
-                    if inter.expects_input == True and tr._holder.__bases__[0] == BlockingTransferHolder:
+                    if inter.expects_input == True:
                         tr._stdreq.put(inter.proc_stdout)
                     inter.in_progress = True
             no_track_inters = []
