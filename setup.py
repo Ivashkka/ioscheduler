@@ -1,6 +1,6 @@
 from setuptools import setup, find_packages
 
-VERSION = '0.0.1'
+VERSION = '0.0.2'
 DESCRIPTION = 'Python module that helps to organize input / output operations and async processes'
 
 with open('README.md', 'r') as f:
