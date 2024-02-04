@@ -59,6 +59,7 @@ class Transfer:
     _stdin_in_iteration = False # only for free
     _stdinout_in_iteration = False # only for blocking
     _in_init_state = False
+    _in_stop_state = False
     _holder = None
     _skip_next_iteration = False
 
@@ -96,7 +97,11 @@ class Transfer:
             self._in_init_state = False
             self._stdout_in_iteration = False
             return
-
+        if self._holder.stop_condition(self) == True and self._in_stop_state == False:
+            self._in_stop_state = True
+            await self.stop()
+            self._stdout_in_iteration = False
+            return
         if self._stdout.empty() == True or self._holder.is_stdout_available(self) != True:
             self._stdout_in_iteration = False
             return
@@ -114,7 +119,10 @@ class Transfer:
     async def _stdin_iteration_call(self):
         self._stdin_in_iteration = True
         if self._in_init_state == True:
-            self._stdout_in_iteration = False
+            self._stdin_in_iteration = False
+            return
+        if self._in_stop_state == True:
+            self._stdin_in_iteration = False
             return
         if self._stdreq.empty() == True or self._holder.is_stdin_available(self) != True:
             self._stdin_in_iteration = False
@@ -135,6 +143,16 @@ class Transfer:
             self._skip_next_iteration = False
             return
         self._stdinout_in_iteration = True
+        if self._in_init_state == True:
+            await self._holder.on_start(self)
+            self._in_init_state = False
+            self._stdinout_in_iteration = False
+            return
+        if self._holder.stop_condition(self) == True and self._in_stop_state == False:
+            self._in_stop_state = True
+            await self.stop()
+            self._stdinout_in_iteration = False
+            return
         if self._stdout.empty() == False and self._holder.is_stdout_available(self) == True:
             all_stdout_data = queue.Queue()
             while self._stdout.empty() != True:
@@ -219,6 +237,10 @@ class BlockingTransferHolder:
     @staticmethod
     def is_fatal(transfer : Transfer, return_code):
         return False
+
+    @staticmethod
+    def stop_condition(transfer : Transfer):
+        return False
     ### rewrite functions ###
 
 
@@ -256,6 +278,10 @@ class FreeTransferHolder:
     @staticmethod
     def is_fatal(transfer : Transfer, return_code):
         return False
+
+    @staticmethod
+    def stop_condition(transfer : Transfer):
+        return False
     ### rewrite functions ###
 
 
@@ -266,6 +292,7 @@ class Process:
     _alive = False
     _in_iteration = False
     _in_init_state = False
+    _in_stop_state = False
 
     locals = None
     tag = None
@@ -300,6 +327,11 @@ class Process:
             self._in_init_state = False
             self._in_iteration = False
             return
+        if self._holder.stop_condition(self) == True and self._in_stop_state == False:
+            self._in_stop_state = True
+            await self.stop()
+            self._in_iteration = False
+            return
         if self._holder.is_body_available(self) != True:
             self._in_iteration = False
             return
@@ -317,8 +349,8 @@ class Process:
         self._interrupt = None
         return code.data
 
-    async def input_interrupt(self, no_track : bool = False, track_uuid : str = ud.uuid4().hex[:20], blocking_output = None):
-        self._interrupt = _Interrupt(self.pid, self.tag, no_track, True, track_uuid, blocking_output)
+    async def input_interrupt(self, no_track : bool = False, track_uuid : str = ud.uuid4().hex[:20], proc_output = None):
+        self._interrupt = _Interrupt(self.pid, self.tag, no_track, True, track_uuid, proc_output)
         while self._interrupt.freeze == True:
             await asyncio.sleep(0)
         data, code = self._interrupt.transfer_stdin, self._interrupt.transfer_stderr
@@ -361,6 +393,10 @@ class ProcessHolder:
 
     @staticmethod
     def is_fatal(process : Process, return_value):
+        return False
+
+    @staticmethod
+    def stop_condition(process : Process):
         return False
 ### rewrite functions ###
 
@@ -433,17 +469,19 @@ class _Core:
 
             all_inputs = []
             all_errors = []
+            all_tr_tags = []
 
             for tr in allTransfers:
                 while tr._stdin.empty() != True:
                     all_inputs.append(tr._stdin.get())
                 while tr._stderr.empty() != True:
                     all_errors.append(tr._stderr.get())
+                all_tr_tags.append(tr.tag)
                 for inter in allInterrupts:
                     if inter.freeze == False: continue
                     if inter.proc_tag != tr.tag: continue
                     if inter.in_progress == True: continue
-                    if inter.proc_stdout.data != None and inter.expects_input != True:
+                    if inter.proc_stdout.data != None and tr._holder.__bases__[0] != BlockingTransferHolder:
                         tr._stdout.put(inter.proc_stdout)
                     if inter.expects_input == True:
                         tr._stdreq.put(inter.proc_stdout)
@@ -476,6 +514,11 @@ class _Core:
                         allInterrupts[i].freeze = False
                     elif allInterrupts[i].transfer_stdin != None:
                         allInterrupts[i].freeze = False
+                if allInterrupts[i].proc_tag not in all_tr_tags:
+                    if allInterrupts[i].transfer_stderr == None: allInterrupts[i].transfer_stderr = _StderrCall(None, None, None,None)
+                    if allInterrupts[i].transfer_stdin == None: allInterrupts[i].transfer_stdin = _StdinCall(None, None, None,None)
+                    allInterrupts[i].freeze = False
+                    continue
 
             for nt in no_track_inters:
                 for inp in all_inputs:
