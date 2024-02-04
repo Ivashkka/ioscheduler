@@ -305,16 +305,16 @@ class Process:
             await self._holder.on_fatal(self)
         self._in_iteration = False
 
-    async def output_interrupt(self, proc_output : object = None):
-        self._interrupt = _Interrupt(self.pid, self.tag, False, False, proc_output)
+    async def output_interrupt(self, proc_output : object = None, track_uuid : str = ud.uuid4().hex[:20]):
+        self._interrupt = _Interrupt(self.pid, self.tag, False, False, track_uuid, proc_output)
         while self._interrupt.freeze == True:
             await asyncio.sleep(0)
         code = self._interrupt.transfer_stderr
         self._interrupt = None
         return code.data
 
-    async def input_interrupt(self, no_track : bool = False, blocking_output = None):
-        self._interrupt = _Interrupt(self.pid, self.tag, no_track, True, blocking_output)
+    async def input_interrupt(self, no_track : bool = False, track_uuid : str = ud.uuid4().hex[:20], blocking_output = None):
+        self._interrupt = _Interrupt(self.pid, self.tag, no_track, True, track_uuid, blocking_output)
         while self._interrupt.freeze == True:
             await asyncio.sleep(0)
         data, code = self._interrupt.transfer_stdin, self._interrupt.transfer_stderr
@@ -363,12 +363,12 @@ class ProcessHolder:
 
 class _Interrupt:
     _AllInterrupts = _SemaphoredList([]) # static field
-    def __init__(self, process_pid : int, process_tag, no_track : bool, expects_input : bool, proc_stdout = None):
+    def __init__(self, process_pid : int, process_tag, no_track : bool, expects_input : bool, track_uuid : str, proc_stdout = None):
         self.expects_input = expects_input
         self.proc_pid = process_pid
         self.proc_tag = process_tag
         self.no_track = no_track
-        self.interrupt_uuid = ud.uuid4().hex[:20]
+        self.interrupt_uuid = track_uuid
 
         self.proc_stdout = _StdoutClall(proc_stdout, process_pid, self.interrupt_uuid, process_tag)
         self.transfer_stdin = None
