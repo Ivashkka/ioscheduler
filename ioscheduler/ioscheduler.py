@@ -310,6 +310,7 @@ class Process:
         self.tag = tag
         self._alive = True
         self._in_init_state = True
+        self.my_future = asyncio.Future()
         Process._AliveCount += 1
 
     @staticmethod
@@ -319,6 +320,7 @@ class Process:
         allProcesses = Process._AllProcesses._open_list()
         allProcesses.append(self_process)
         Process._AllProcesses._close_list()
+        return self_process.my_future
 
     async def _body_iteration_call(self):
         self._in_iteration = True
@@ -357,7 +359,11 @@ class Process:
         self._interrupt = None
         return data.data, code.data
 
+    async def return_interrupt(self, future_to_await : asyncio.Future):
+        return await future_to_await
+
     async def stop(self):
+        self.my_future.set_result(self.return_value)
         await self._holder.on_stop(self)
         self._alive = False
         Process._AliveCount -= 1
@@ -553,7 +559,7 @@ def start():
     _Core._start()
 
 def create_process(holder : ProcessHolder, locals : object, tag : str):
-    Process.create_process(holder, locals, tag)
+    return Process.create_process(holder, locals, tag)
 
 def create_transfer(holder : Union[FreeTransferHolder, BlockingTransferHolder], locals : object, tag : str):
     Transfer.create_transfer(holder, locals, tag)
